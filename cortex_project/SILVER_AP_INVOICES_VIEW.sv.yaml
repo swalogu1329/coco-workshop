@@ -1,0 +1,194 @@
+name: SILVER_AP_INVOICES_VIEW
+description: >-
+  This semantic view supports Accounts Payable analytics across the Baan IV (EMEA)
+  and Workday (Americas) source systems. It represents data at the individual invoice
+  level. It enables analysis of invoice volumes, approval bottlenecks, vendor spend,
+  non-PO spend, and credit memos by source system, vendor, cost center, and time period.
+  Amounts are in the original transaction currency (EUR, GBP, USD) with no FX conversion —
+  do not sum or compare amounts across different currencies without explicit conversion.
+  Payment terms are in source-native format (N30, Net 30, NET30) and are not yet normalized.
+  Only APPROVED and PENDING statuses exist; any other value indicates an unmapped source variant.
+tables:
+  - name: SILVER_AP_INVOICES
+    description: >-
+      One row per deduplicated AP invoice from Baan IV or Workday. Baan duplicates
+      (same invoice reference, different system IDs) are resolved by keeping the
+      record with the latest creation timestamp. Credit memos appear as rows with
+      negative INVOICE_AMOUNT.
+    base_table:
+      database: COCO_WORKSHOP
+      schema: PUBLIC
+      table: SILVER_AP_INVOICES
+    dimensions:
+      - name: INVOICE_ID
+        expr: INVOICE_ID
+        data_type: VARCHAR
+        description: >-
+          Source system primary key for the invoice. Format varies by source:
+          BAN-NNN (Baan) or WD-NNN (Workday). Not unique across sources —
+          always pair with SOURCE_SYSTEM.
+      - name: INVOICE_NUMBER
+        expr: INVOICE_NUMBER
+        data_type: VARCHAR
+        description: >-
+          Business-facing invoice number used in vendor correspondence and
+          payment matching. This is the deduplication key for Baan invoices.
+      - name: VENDOR_ID
+        expr: VENDOR_ID
+        data_type: VARCHAR
+        description: >-
+          Identifier for the vendor (supplier). Format varies by source:
+          BV-NNN (Baan) or WS-NNN (Workday).
+      - name: VENDOR_NAME
+        expr: VENDOR_NAME
+        data_type: VARCHAR
+        description: >-
+          Full legal or trading name of the vendor. Baan names may contain
+          European special characters (ü, é, ö).
+      - name: CURRENCY_CODE
+        expr: CURRENCY_CODE
+        data_type: VARCHAR
+        description: >-
+          ISO 4217 currency code of the original transaction. Baan invoices
+          are EUR or GBP. Workday invoices are predominantly USD (~70%), with
+          GBP and EUR from the London entity. No conversion is applied.
+        sample_values:
+          - EUR
+          - GBP
+          - USD
+      - name: PAYMENT_TERMS
+        expr: PAYMENT_TERMS
+        data_type: VARCHAR
+        description: >-
+          Payment terms in source-native format. Not normalized at this layer.
+          Baan uses N30/N60, Workday uses Net 30/Net 60. Normalization to
+          NET30/NET60 happens in the Gold layer.
+        sample_values:
+          - N30
+          - N60
+          - Net 30
+          - Net 60
+      - name: PO_NUMBER
+        expr: PO_NUMBER
+        data_type: VARCHAR
+        description: >-
+          Purchase order number linked to the invoice. Nullable — approximately
+          15% of Baan invoices and 10% of Workday invoices have no PO
+          (typically service invoices). A NULL value indicates non-PO spend.
+      - name: LINE_DESCRIPTION
+        expr: LINE_DESCRIPTION
+        data_type: VARCHAR
+        description: >-
+          Free-text description of the invoice line item. May contain Dutch
+          language text from Baan. Called "Memo" in the Workday source.
+      - name: GL_ACCOUNT
+        expr: GL_ACCOUNT
+        data_type: VARCHAR
+        description: >-
+          General ledger account code in source-native format. Baan uses GL-NNN,
+          Workday uses LA-NNNN. No cross-system mapping is applied at this layer;
+          a unified chart of accounts join is planned for Gold Phase 2.
+      - name: COST_CENTER
+        expr: COST_CENTER
+        data_type: VARCHAR
+        description: >-
+          Cost center code. Baan uses BC-XX (pre-Jan 2025) or BC-XXX (post-Jan 2025) —
+          both formats may appear. Workday uses WCC-XXXX consistently.
+      - name: APPROVAL_STATUS
+        expr: APPROVAL_STATUS
+        data_type: VARCHAR
+        description: >-
+          Standardized approval status. APPROVED means the invoice has been validated
+          and is cleared for payment. PENDING means the invoice is awaiting review.
+          Source values are mapped: Baan POSTED→APPROVED, Workday "Approved"→APPROVED,
+          Workday "In Review"→PENDING. Any other value is an unmapped source variant.
+        sample_values:
+          - APPROVED
+          - PENDING
+      - name: SOURCE_SYSTEM
+        expr: SOURCE_SYSTEM
+        data_type: VARCHAR
+        description: >-
+          Identifies which ERP system the invoice originated from. BAAN = Infor Baan IV
+          (EMEA, Netherlands and UK). WORKDAY = Workday Financial Management (Americas,
+          US and Canada).
+        sample_values:
+          - BAAN
+          - WORKDAY
+    time_dimensions:
+      - name: INVOICE_DATE
+        expr: INVOICE_DATE
+        data_type: DATE
+        description: >-
+          Date the invoice was issued by the vendor. Use this as the primary
+          date dimension for trend analysis.
+      - name: DUE_DATE
+        expr: DUE_DATE
+        data_type: DATE
+        description: >-
+          Date by which payment is due to the vendor. The difference between
+          DUE_DATE and INVOICE_DATE reflects the payment terms.
+      - name: CREATED_AT
+        expr: CREATED_AT
+        data_type: TIMESTAMP_NTZ
+        description: >-
+          Timestamp when the invoice record was created in the source system,
+          in UTC. For Baan, this is also the deduplication tiebreaker (latest wins).
+    facts:
+      - name: INVOICE_AMOUNT
+        expr: INVOICE_AMOUNT
+        data_type: NUMBER
+        description: >-
+          Monetary amount of the invoice in the original transaction currency
+          (see CURRENCY_CODE). Positive for standard invoices, negative for
+          credit memos. Do not sum across different currencies without conversion.
+verified_queries:
+  - name: approval_status_by_source
+    question: How many invoices are pending approval by source system?
+    sql: >-
+      SELECT SOURCE_SYSTEM, APPROVAL_STATUS, COUNT(*) AS invoice_count
+      FROM silver_ap_invoices
+      GROUP BY SOURCE_SYSTEM, APPROVAL_STATUS
+      ORDER BY SOURCE_SYSTEM, APPROVAL_STATUS
+    verified_at: 1788608123
+    verified_by: Cortex Code
+  - name: vendor_spend_by_currency
+    question: What is the total invoice amount by vendor and currency?
+    sql: >-
+      SELECT VENDOR_NAME, CURRENCY_CODE, SUM(INVOICE_AMOUNT) AS total_amount,
+      COUNT(*) AS invoice_count
+      FROM silver_ap_invoices
+      GROUP BY VENDOR_NAME, CURRENCY_CODE
+      ORDER BY total_amount DESC
+    verified_at: 1788608123
+    verified_by: Cortex Code
+  - name: non_po_spend_by_vendor
+    question: Which vendors have the highest spending on invoices without purchase orders?
+    sql: >-
+      SELECT VENDOR_NAME, COUNT(*) AS no_po_count, SUM(INVOICE_AMOUNT) AS no_po_amount
+      FROM silver_ap_invoices
+      WHERE PO_NUMBER IS NULL
+      GROUP BY VENDOR_NAME
+      ORDER BY no_po_amount DESC
+    verified_at: 1788608123
+    verified_by: Cortex Code
+  - name: daily_volume_trend
+    question: What is the daily invoice volume and amount trend by source system?
+    sql: >-
+      SELECT INVOICE_DATE, SOURCE_SYSTEM, COUNT(*) AS daily_count,
+      SUM(INVOICE_AMOUNT) AS daily_amount
+      FROM silver_ap_invoices
+      GROUP BY INVOICE_DATE, SOURCE_SYSTEM
+      ORDER BY INVOICE_DATE, SOURCE_SYSTEM
+    verified_at: 1788608123
+    verified_by: Cortex Code
+  - name: credit_memos_by_source
+    question: What are the credit memo volumes and total values by source system?
+    sql: >-
+      SELECT SOURCE_SYSTEM, COUNT(*) AS credit_memo_count,
+      SUM(INVOICE_AMOUNT) AS credit_memo_total
+      FROM silver_ap_invoices
+      WHERE INVOICE_AMOUNT < 0
+      GROUP BY SOURCE_SYSTEM
+    verified_at: 1788608123
+    verified_by: Cortex Code

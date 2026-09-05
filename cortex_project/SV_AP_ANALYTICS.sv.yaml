@@ -1,0 +1,334 @@
+name: SV_AP_ANALYTICS
+description: >-
+  This semantic view supports Accounts Payable spend analytics across the Baan IV
+  (EMEA) and Workday (Americas) source systems. It models AP invoices at the
+  individual invoice level and enables reporting of total AP spend, invoice volumes,
+  vendor performance, approval bottlenecks, and non-PO spend by business unit,
+  vendor, currency, and time period. All monetary amounts are in the original
+  transaction currency (EUR, GBP, USD) with no FX conversion — do not compare
+  spend totals across currencies without conversion. Only the Silver layer is
+  represented; currency-converted amounts are available in the Gold layer.
+tables:
+  - name: SILVER_AP_INVOICES
+    description: >-
+      Represents deduplicated AP invoices from Baan IV and Workday. Grain: one row
+      per invoice per source system. Baan duplicates are resolved by keeping the
+      latest creation timestamp. Credit memos appear as rows with negative
+      INVOICE_AMOUNT. This is the primary fact table for AP spend and volume analysis.
+    base_table:
+      database: COCO_WORKSHOP
+      schema: PUBLIC
+      table: SILVER_AP_INVOICES
+    primary_key:
+      columns:
+        - INVOICE_ID
+        - SOURCE_SYSTEM
+    dimensions:
+      - name: INVOICE_ID
+        expr: INVOICE_ID
+        data_type: VARCHAR
+        description: >-
+          Source system primary key. Format: BAN-NNN (Baan) or WD-NNN (Workday).
+          Not globally unique — always pair with SOURCE_SYSTEM.
+      - name: INVOICE_NUMBER
+        expr: INVOICE_NUMBER
+        data_type: VARCHAR
+        description: >-
+          Business-facing invoice number used in vendor correspondence and payment
+          matching. Unique within each source system after Baan deduplication.
+      - name: VENDOR_ID
+        expr: VENDOR_ID
+        data_type: VARCHAR
+        description: >-
+          Vendor identifier. Format: BV-NNN (Baan) or WS-NNN (Workday).
+        synonyms:
+          - supplier id
+          - supplier code
+      - name: VENDOR_NAME
+        expr: VENDOR_NAME
+        data_type: VARCHAR
+        description: >-
+          Full legal or trading name of the vendor. Use for display and grouping
+          in vendor spend reports.
+        synonyms:
+          - supplier name
+          - supplier
+          - vendor
+      - name: CURRENCY_CODE
+        expr: CURRENCY_CODE
+        data_type: VARCHAR
+        description: >-
+          ISO 4217 currency of the original transaction. Baan: EUR/GBP.
+          Workday: USD (~70%), GBP, EUR. Always include this dimension when
+          aggregating monetary amounts.
+        is_enum: true
+        sample_values:
+          - EUR
+          - GBP
+          - USD
+      - name: PAYMENT_TERMS
+        expr: PAYMENT_TERMS
+        data_type: VARCHAR
+        description: >-
+          Payment terms in source-native format, not normalized. Baan: N30/N60.
+          Workday: Net 30/Net 60. Normalization planned for Gold layer.
+        sample_values:
+          - N30
+          - N60
+          - Net 30
+          - Net 60
+      - name: PO_NUMBER
+        expr: PO_NUMBER
+        data_type: VARCHAR
+        description: >-
+          Purchase order number. NULL indicates non-PO spend (typically service
+          invoices). ~15% of Baan and ~10% of Workday invoices lack a PO.
+        synonyms:
+          - purchase order
+          - PO
+      - name: LINE_DESCRIPTION
+        expr: LINE_DESCRIPTION
+        data_type: VARCHAR
+        description: >-
+          Free-text description of the invoice line. May contain Dutch text
+          from Baan. Called "Memo" in Workday.
+      - name: GL_ACCOUNT
+        expr: GL_ACCOUNT
+        data_type: VARCHAR
+        description: >-
+          General ledger account in source-native format. Baan: GL-NNN.
+          Workday: LA-NNNN. No unified chart of accounts at this layer.
+        synonyms:
+          - ledger account
+          - GL code
+      - name: COST_CENTER
+        expr: COST_CENTER
+        data_type: VARCHAR
+        description: >-
+          Cost center code representing the business unit charged for the
+          invoice. Baan: BC-XX (pre-Jan 2025) or BC-XXX (post-Jan 2025).
+          Workday: WCC-XXXX.
+        synonyms:
+          - business unit
+          - department
+          - cost centre
+      - name: APPROVAL_STATUS
+        expr: APPROVAL_STATUS
+        data_type: VARCHAR
+        description: >-
+          Standardized approval status. APPROVED = cleared for payment.
+          PENDING = awaiting review. Any other value is an unmapped source
+          variant requiring engineering review.
+        is_enum: true
+        sample_values:
+          - APPROVED
+          - PENDING
+        synonyms:
+          - status
+          - approval state
+      - name: SOURCE_SYSTEM
+        expr: SOURCE_SYSTEM
+        data_type: VARCHAR
+        description: >-
+          Originating ERP. BAAN = Infor Baan IV (EMEA). WORKDAY = Workday
+          Financial Management (Americas).
+        is_enum: true
+        sample_values:
+          - BAAN
+          - WORKDAY
+        synonyms:
+          - source
+          - ERP system
+      - name: HAS_PO
+        expr: "CASE WHEN PO_NUMBER IS NOT NULL THEN 'Yes' ELSE 'No' END"
+        data_type: VARCHAR
+        description: >-
+          Whether the invoice is backed by a purchase order. 'Yes' = PO-backed
+          spend. 'No' = non-PO (maverick) spend.
+        is_enum: true
+        synonyms:
+          - has purchase order
+          - PO backed
+      - name: IS_CREDIT_MEMO
+        expr: "CASE WHEN INVOICE_AMOUNT < 0 THEN 'Yes' ELSE 'No' END"
+        data_type: VARCHAR
+        description: >-
+          Whether the invoice is a credit memo (negative amount). 'Yes' = credit
+          memo issued by the vendor. 'No' = standard invoice.
+        is_enum: true
+    time_dimensions:
+      - name: INVOICE_DATE
+        expr: INVOICE_DATE
+        data_type: DATE
+        description: >-
+          Date the invoice was issued by the vendor. Primary date dimension
+          for spend trend analysis (monthly, quarterly, yearly).
+        synonyms:
+          - invoice month
+          - invoice period
+          - date
+      - name: DUE_DATE
+        expr: DUE_DATE
+        data_type: DATE
+        description: >-
+          Date by which payment is due. Use for aging and overdue analysis.
+          The gap between DUE_DATE and INVOICE_DATE reflects payment terms.
+        synonyms:
+          - payment due date
+          - due by
+      - name: CREATED_AT
+        expr: CREATED_AT
+        data_type: TIMESTAMP_NTZ
+        description: >-
+          Timestamp (UTC) when the invoice was created in the source system.
+          For Baan, this is also the deduplication tiebreaker.
+    facts:
+      - name: INVOICE_AMOUNT
+        expr: INVOICE_AMOUNT
+        data_type: NUMBER
+        description: >-
+          Monetary amount in the original transaction currency. Positive for
+          standard invoices, negative for credit memos. Always group by
+          CURRENCY_CODE when summing.
+        synonyms:
+          - amount
+          - spend
+          - invoice value
+    metrics:
+      - name: TOTAL_AP_SPEND
+        expr: SUM(INVOICE_AMOUNT)
+        description: >-
+          Total AP spend. Calculated as the sum of all invoice amounts including
+          credit memos. Reported in the original transaction currency — always
+          slice by CURRENCY_CODE. Fully additive across vendor, cost center,
+          time, and source system within a single currency.
+        synonyms:
+          - total spend
+          - total invoice amount
+          - AP spend
+      - name: INVOICE_COUNT
+        expr: COUNT(*)
+        description: >-
+          Total number of invoices. Includes both standard invoices and credit
+          memos. Fully additive across all dimensions.
+        synonyms:
+          - number of invoices
+          - invoice volume
+          - count of invoices
+      - name: APPROVED_SPEND
+        expr: "SUM(CASE WHEN APPROVAL_STATUS = 'APPROVED' THEN INVOICE_AMOUNT ELSE 0 END)"
+        description: >-
+          Total spend on approved invoices only (cleared for payment). Same
+          currency caveat as TOTAL_AP_SPEND.
+        synonyms:
+          - approved amount
+          - paid amount
+      - name: PENDING_SPEND
+        expr: "SUM(CASE WHEN APPROVAL_STATUS = 'PENDING' THEN INVOICE_AMOUNT ELSE 0 END)"
+        description: >-
+          Total spend on invoices still pending approval. Represents the
+          approval backlog in monetary terms. Same currency caveat.
+        synonyms:
+          - unpaid amount
+          - outstanding amount
+          - unapproved amount
+          - pending amount
+      - name: PENDING_COUNT
+        expr: "SUM(CASE WHEN APPROVAL_STATUS = 'PENDING' THEN 1 ELSE 0 END)"
+        description: >-
+          Number of invoices still awaiting approval.
+        synonyms:
+          - unpaid invoice count
+          - pending invoice count
+      - name: NON_PO_SPEND
+        expr: "SUM(CASE WHEN PO_NUMBER IS NULL THEN INVOICE_AMOUNT ELSE 0 END)"
+        description: >-
+          Total spend on invoices without a purchase order (maverick spend).
+          Useful for procurement compliance monitoring.
+        synonyms:
+          - maverick spend
+          - unmatched spend
+          - spend without PO
+      - name: AVERAGE_INVOICE_AMOUNT
+        expr: AVG(INVOICE_AMOUNT)
+        description: >-
+          Average invoice amount. Non-additive — do not sum across dimensions.
+          Includes credit memos which may pull the average down.
+        synonyms:
+          - avg invoice
+          - mean invoice amount
+
+module_custom_instructions:
+  sql_generation: >-
+    CRITICAL: All monetary amounts are in the original transaction currency.
+    When the user asks for spend totals, ALWAYS include CURRENCY_CODE in the
+    GROUP BY or WHERE clause. If the user asks for a single total without
+    specifying a currency, group by CURRENCY_CODE and return one row per
+    currency. Never sum amounts across EUR, GBP, and USD without explicit
+    FX conversion.
+
+    When the user says "business unit" they mean COST_CENTER.
+    When they say "unpaid" or "outstanding" they mean APPROVAL_STATUS = 'PENDING'.
+    When they say "last 12 months" use INVOICE_DATE >= DATEADD(MONTH, -12, CURRENT_DATE()).
+
+verified_queries:
+  - name: total_ap_spend_by_vendor_12m
+    question: Total AP spend by vendor over the last 12 months
+    use_as_onboarding_question: true
+    sql: >-
+      SELECT VENDOR_NAME, CURRENCY_CODE, SUM(INVOICE_AMOUNT) AS total_spend
+      FROM silver_ap_invoices
+      WHERE INVOICE_DATE >= DATEADD(MONTH, -12, CURRENT_DATE())
+      GROUP BY VENDOR_NAME, CURRENCY_CODE
+      ORDER BY total_spend DESC
+    verified_at: 1788610000
+    verified_by: Cortex Code
+  - name: invoice_count_by_month_and_bu
+    question: Invoice count by month and business unit
+    use_as_onboarding_question: true
+    sql: >-
+      SELECT DATE_TRUNC('MONTH', INVOICE_DATE) AS invoice_month,
+             COST_CENTER AS business_unit,
+             COUNT(*) AS invoice_count
+      FROM silver_ap_invoices
+      GROUP BY invoice_month, business_unit
+      ORDER BY invoice_month, business_unit
+    verified_at: 1788610000
+    verified_by: Cortex Code
+  - name: top_10_vendors_unpaid
+    question: Top 10 vendors by unpaid invoice amount
+    use_as_onboarding_question: true
+    sql: >-
+      SELECT VENDOR_NAME, CURRENCY_CODE,
+             SUM(INVOICE_AMOUNT) AS unpaid_amount,
+             COUNT(*) AS unpaid_count
+      FROM silver_ap_invoices
+      WHERE APPROVAL_STATUS = 'PENDING'
+      GROUP BY VENDOR_NAME, CURRENCY_CODE
+      ORDER BY unpaid_amount DESC
+      LIMIT 10
+    verified_at: 1788610000
+    verified_by: Cortex Code
+  - name: non_po_spend_by_vendor
+    question: Which vendors have the most spend without a purchase order?
+    sql: >-
+      SELECT VENDOR_NAME, CURRENCY_CODE,
+             SUM(INVOICE_AMOUNT) AS non_po_spend,
+             COUNT(*) AS non_po_count
+      FROM silver_ap_invoices
+      WHERE PO_NUMBER IS NULL
+      GROUP BY VENDOR_NAME, CURRENCY_CODE
+      ORDER BY non_po_spend DESC
+    verified_at: 1788610000
+    verified_by: Cortex Code
+  - name: daily_volume_by_source
+    question: What is the daily invoice volume trend by source system?
+    sql: >-
+      SELECT INVOICE_DATE, SOURCE_SYSTEM,
+             COUNT(*) AS daily_count,
+             SUM(INVOICE_AMOUNT) AS daily_amount
+      FROM silver_ap_invoices
+      GROUP BY INVOICE_DATE, SOURCE_SYSTEM
+      ORDER BY INVOICE_DATE, SOURCE_SYSTEM
+    verified_at: 1788610000
+    verified_by: Cortex Code
