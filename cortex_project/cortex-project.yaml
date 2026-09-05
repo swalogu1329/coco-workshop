@@ -1,0 +1,17 @@
+version: 1
+artifacts:
+  - path: SILVER_AP_INVOICES_VIEW.sv.yaml
+    type: semantic_view
+    targets:
+      default:
+        object: COCO_WORKSHOP.PUBLIC.SILVER_AP_INVOICES_VIEW
+  - path: AP_INVOICES_AGENT.agent.yaml
+    type: cortex_agent
+    targets:
+      default:
+        object: COCO_WORKSHOP.PUBLIC.AP_INVOICES_AGENT
+  - path: SV_AP_ANALYTICS.sv.yaml
+    type: semantic_view
+    targets:
+      default:
+        object: COCO_WORKSHOP.PUBLIC.SV_AP_ANALYTICS
